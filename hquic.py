@@ -66,7 +66,7 @@ class GameNetAPI:
     async def _send_reliable(self, seq):
         entry = self.sent_buffer[seq]
         while not entry["acked"]:
-            self.quic._quic.send_stream_data(0, entry["data"], end_stream=False)
+            self.quic._quic.send_datagram_frame(entry["data"])
             entry["attempts"] += 1
             await asyncio.sleep(RETX_INTERVAL)
             if now() - entry["send_ts"] >= T_THRESHOLD:
@@ -85,6 +85,7 @@ class GameNetAPI:
     def receive_datagram(self, data: bytes):
         reliable, seq, ts, payload = parse_header(data)
         rtt = now() - ts
+        print("debug: ", data[:20])
 
         if reliable:
             # Acknowledge back

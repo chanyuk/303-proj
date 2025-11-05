@@ -21,6 +21,7 @@ def make_json_payload(i):
 async def run(host, port, count, rate, seed, certfile):
     random.seed(seed)
     cfg = QuicConfiguration(is_client=True)
+    cfg.max_datagram_frame_size = 65536
     if certfile:
         cfg.load_verify_locations(certfile)
 
@@ -73,6 +74,7 @@ async def run(host, port, count, rate, seed, certfile):
             "total_sent": sent_counts["reliable"] + sent_counts["unreliable"],
             "run_ts": time.time()
         }
+        print(summary)
         payload = json.dumps(summary).encode()
         seq = await api.send_data(payload, reliable=True)
         print(f"[SENDER] Sent final STATS (seq={seq})")
