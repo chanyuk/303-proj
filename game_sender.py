@@ -63,6 +63,7 @@ async def run(host, port, count, rate, seed, certfile):
             print(f"[SENDER] Sent seq={seq} reliable={reliable} len={len(payload)} type={typ}")
             await asyncio.sleep(interval)
 
+        api.print_api_stats()
         # Wait a bit to allow retransmissions & acks to arrive
         await asyncio.sleep(1.0)
 

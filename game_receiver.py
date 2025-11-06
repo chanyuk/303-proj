@@ -13,43 +13,47 @@ class ReceiverStats:
         self.start_ts = time.time()
         self.end_ts = None
         self.data = {
-            "reliable": {"rtts": [], "count": 0, "bytes_received": 0},
-            "unreliable": {"rtts": [], "count": 0, "bytes_received": 0},
+            "reliable": {"latencies": [], "count": 0, "bytes_received": 0, "start": None, "last": None},
+            "unreliable": {"latencies": [], "count": 0, "bytes_received": 0, "start": None, "last": None},
         }
         self.sender_stats = None
 
-    def add_packet(self, seq, reliable, ts, payload, rtt):
+    def add_packet(self, seq, reliable, ts, payload, now):
         self.end_ts = time.time()
+        latency = now - ts
         channel = "reliable" if reliable else "unreliable"
-        self.data[channel]["rtts"].append(rtt)
+        if self.data[channel]["start"] is None:
+            self.data[channel]["start"] = now
+        self.data[channel]["last"] = now
+        self.data[channel]["latencies"].append(latency)
         self.data[channel]["count"] += 1
         self.data[channel]["bytes_received"] += len(payload)
         # print per-packet log
-        print(f"SeqNo: {seq}, Channel: {channel}, RTT: {rtt:.3f}s, Payload: {payload}")
+        print(f"SeqNo: {seq}, Channel: {channel}, One-Way Latency: {latency:.3f}s, Payload: {payload}")
 
     
     def set_sender_stats(self, sent_reliable, sent_unreliable):
         self.sender_stats = {"reliable": sent_reliable, "unreliable": sent_unreliable}
 
-    def avg_rtt(self, channel):
-        rtts = self.data[channel]["rtts"]
-        return sum(rtts) / len(rtts) if rtts else 0
+    def avg_latency(self, channel):
+        latencies = self.data[channel]["latencies"]
+        return sum(latencies) / len(latencies) if latencies else 0
 
     def calculate_jitter_rfc3550(self, channel):
-        rtts = self.data[channel]["rtts"]
-        if len(rtts) < 2:
+        latencies = self.data[channel]["latencies"]
+        if len(latencies) < 2:
             return 0
         jitter = 0
-        for i in range(1, len(rtts)):
-            diff = abs(rtts[i] - rtts[i-1])
+        for i in range(1, len(latencies)):
+            diff = abs(latencies[i] - latencies[i-1])
             jitter = jitter + (diff - jitter) / 16
         return jitter
 
     def calculate_throughput_kbps(self, channel):
-        if self.end_ts is None:
+        if (self.data[channel]["last"] is None) or (self.data[channel]["start"] is None):
                 return 0
 
-        duration = self.end_ts - self.start_ts
+        duration = self.data[channel]["last"] - self.data[channel]["start"]
         if duration <= 0:
             return 0
         bytes_received = self.data[channel]["bytes_received"]
@@ -71,7 +75,7 @@ class ReceiverStats:
         duration = self.end_ts - self.start_ts
         for ch in ["reliable", "unreliable"]:
             count = self.data[ch]["count"]
-            avg_rtt = self.avg_rtt(ch)
+            avg_latency = self.avg_latency(ch)
             jitter = self.calculate_jitter_rfc3550(ch)
             throughput = self.calculate_throughput_kbps(ch)
             delivery_ratio = self.calculate_delivery_ratio(ch)
@@ -79,17 +83,20 @@ class ReceiverStats:
             
             print(f"[RECEIVER STATS] {ch.capitalize():10s} - "
                   f"Packets: {count:3d}, "
-                  f"Latency: {avg_rtt*1000:6.2f}ms, "
+                  f"Latency: {avg_latency*1000:6.2f}ms, "
                   f"Jitter: {jitter*1000:5.2f}ms, "
                   f"Throughput: {throughput:6.2f}Kbps, "
-                  f"Delivery: {delivery_str}")
+                  f"Delivery: {delivery_str}, "
+                  f"Duration: {duration:.2f}, "
+                  )
         
 # -----------------------------
 # Receiver callback
 # -----------------------------
 stats = ReceiverStats()
 
-def receiver_callback(seq, reliable, ts, payload, rtt):
+def receiver_callback(seq, reliable, ts, payload):
+    now = time.time()
     if reliable:
         try:
             obj = json.loads(payload.decode())
@@ -103,7 +110,7 @@ def receiver_callback(seq, reliable, ts, payload, rtt):
             total = obj.get("total_sent")
             print(f"[RECEIVER] Sender summary received: {total} packets sent")
             return
-    stats.add_packet(seq, reliable, ts, payload, rtt)
+    stats.add_packet(seq, reliable, ts, payload, now)
 
 # -----------------------------
 # QUIC server setup

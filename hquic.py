@@ -8,8 +8,8 @@ from aioquic.quic.events import DatagramFrameReceived, StreamDataReceived
 # -----------------------------
 # Constants
 # -----------------------------
-RETX_INTERVAL = 0.05     # 50 ms between retransmission attempts
-T_THRESHOLD = 0.200      # 200 ms total lifetime for reliable retransmission
+RETX_INTERVAL = 0.02     # 50 ms between retransmission attempts
+T_THRESHOLD = 0.150      # 200 ms total lifetime for reliable retransmission
 
 # -----------------------------
 # Helpers
@@ -38,6 +38,8 @@ class GameNetAPI:
         self.pending_reliable = {}   # receiver buffer for reordering
         self.last_delivered = 0
         self.receive_callback = None
+        self.start_ts = time.time()
+        self.total_bytes = {"reliable": 0, "unreliable": 0}
 
     def set_receive_callback(self, cb):
         self.receive_callback = cb
@@ -61,6 +63,7 @@ class GameNetAPI:
         else:
             # Unreliable uses QUIC datagram
             packet = build_header(reliable, seq, payload)
+            self.total_bytes["unreliable"] += len(packet)
             self.quic._quic.send_datagram_frame(packet)
             self.quic.transmit()
         return seq
@@ -82,7 +85,9 @@ class GameNetAPI:
                 payload = entry["data"][13:]   # strip old header
                 packet = build_header(reliable, seq, payload)
                 entry["data"] = packet
+                print(f"[RETRANSMITTING] Retransmitting {seq}, attempt {entry["attempts"]}")
             
+            self.total_bytes["reliable"] += len(entry["data"])
             self.quic._quic.send_datagram_frame(entry["data"])
             self.quic.transmit()
             
@@ -102,8 +107,6 @@ class GameNetAPI:
     # -----------------------------
     def receive_datagram(self, data: bytes):
         reliable, seq, ts, payload = parse_header(data)
-        rtt = now() - ts
-        print("debug: ", data[:20])
 
         if reliable:
             # Acknowledge back
@@ -119,7 +122,7 @@ class GameNetAPI:
         else:
             # Deliver immediately (unreliable)
             if self.receive_callback:
-                self.receive_callback(seq, reliable, ts, payload, rtt)
+                self.receive_callback(seq, reliable, ts, payload)
     
     def _try_deliver_in_order(self):
         self._cleanup_pending()
@@ -133,11 +136,10 @@ class GameNetAPI:
             # Case 1: Expected packet is available
             if expected in self.pending_reliable:
                 payload, send_ts, arrival_ts = self.pending_reliable.pop(expected)
-                rtt = arrival_ts - send_ts
                 
                 if self.receive_callback:
                     try:
-                        self.receive_callback(expected, True, send_ts, payload, rtt)
+                        self.receive_callback(expected, True, send_ts, payload)
                     except Exception as e:
                         print(f"[RECEIVER] Callback error for seq {expected}: {e}")
                 
@@ -175,6 +177,18 @@ class GameNetAPI:
         stale = [seq for seq in self.pending_reliable if seq <= self.last_delivered]
         for seq in stale:
             self.pending_reliable.pop(seq, None)
+    
+    def print_api_stats(self):
+        duration = time.time() - self.start_ts if self.start_ts else 0
+        if duration <= 0:
+            return 0
+        for ch in ["reliable", "unreliable"]: 
+            bytes_sent = self.total_bytes[ch]
+            throughput = (bytes_sent * 8) / (duration * 1000)
+            print("================== FINAL STATS ==================")
+            print(f"[API STATS] {ch.capitalize():10s} - "
+                  f"Throughput: {throughput:6.2f}Kbps")
+            
 
 # -----------------------------
 # GameQuicProtocol
