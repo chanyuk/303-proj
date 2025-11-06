@@ -60,24 +60,42 @@ class GameNetAPI:
             asyncio.create_task(self._send_reliable(seq))
         else:
             # Unreliable uses QUIC datagram
+            packet = build_header(reliable, seq, payload)
             self.quic._quic.send_datagram_frame(packet)
+            self.quic.transmit()
         return seq
-
+                
     async def _send_reliable(self, seq):
         entry = self.sent_buffer[seq]
+        
         while not entry["acked"]:
+            # if not first attempt, check threshold timeout and rebuild header with new timestamp
+            if entry["attempts"] > 0:
+                if now() - entry["send_ts"] >= T_THRESHOLD:
+                    print(f"[SENDER] Give up seq {seq}")
+                    if seq in self.sent_buffer:
+                        del self.sent_buffer[seq]
+                    break
+    
+                # rebuild header so that there is new timestamp
+                reliable, _, _ = True, seq, None
+                payload = entry["data"][13:]   # strip old header
+                packet = build_header(reliable, seq, payload)
+                entry["data"] = packet
+            
             self.quic._quic.send_datagram_frame(entry["data"])
+            self.quic.transmit()
+            
             entry["attempts"] += 1
             await asyncio.sleep(RETX_INTERVAL)
-            if now() - entry["send_ts"] >= T_THRESHOLD:
-                print(f"[SENDER] Give up seq {seq}")
-                del self.sent_buffer[seq]
-                break
 
     def mark_acked(self, seq):
-        if seq in self.sent_buffer:
-            self.sent_buffer[seq]["acked"] = True
+        entry = self.sent_buffer.get(seq)
+        if entry:
+            entry["acked"] = True
             print(f"[SENDER] ACK received for seq {seq}")
+        else:
+            print(f"[SENDER] Received ACK for already-removed seq {seq} (timeout or duplicate)")
 
     # -----------------------------
     # Receiving
@@ -91,29 +109,72 @@ class GameNetAPI:
             # Acknowledge back
             ack = f"ACK:{seq}".encode()
             self.quic._quic.send_datagram_frame(ack)
-            self.pending_reliable[seq] = (payload, now())
+            self.quic.transmit()
+            if seq <= self.last_delivered:
+                return
+            if seq in self.pending_reliable:
+                return
+            self.pending_reliable[seq] = (payload, ts, now())
             self._try_deliver_in_order()
         else:
             # Deliver immediately (unreliable)
             if self.receive_callback:
                 self.receive_callback(seq, reliable, ts, payload, rtt)
-
+    
     def _try_deliver_in_order(self):
-        expected = self.last_delivered + 1
-        while expected in self.pending_reliable:
-            payload, arrival = self.pending_reliable.pop(expected)
-            rtt = now() - arrival
-            if self.receive_callback:
-                self.receive_callback(expected, True, arrival, payload, rtt)
-            self.last_delivered = expected
-            expected += 1
+        self._cleanup_pending()
 
-        # Handle timeout skip
-        for seq, (payload, arrival) in list(self.pending_reliable.items()):
-            if now() - arrival >= T_THRESHOLD:
-                print(f"[RECEIVER] Skipping lost seq {seq}")
-                del self.pending_reliable[seq]
-                self.last_delivered = seq
+        delivered_count = 0
+        skipped_count = 0
+
+        while True:
+            expected = self.last_delivered + 1
+
+            # Case 1: Expected packet is available
+            if expected in self.pending_reliable:
+                payload, send_ts, arrival_ts = self.pending_reliable.pop(expected)
+                rtt = arrival_ts - send_ts
+                
+                if self.receive_callback:
+                    try:
+                        self.receive_callback(expected, True, send_ts, payload, rtt)
+                    except Exception as e:
+                        print(f"[RECEIVER] Callback error for seq {expected}: {e}")
+                
+                self.last_delivered = expected
+                delivered_count += 1
+                self._cleanup_pending()
+                continue
+
+            # Case 2: Expected packet missing - check timeout
+            if self.pending_reliable:
+                higher_seqs = [s for s in self.pending_reliable if s > expected]
+                # only skip if we have packets AFTER the expected one
+                if higher_seqs:
+                    # Check how long we've been waiting for the expected packet
+                    # Use the arrival time of the earliest packet we DO have
+                    oldest_arrival = min(arr for (_, _, arr) in self.pending_reliable.values())
+                    wait_time = now() - oldest_arrival
+                    
+                    if wait_time >= T_THRESHOLD:
+                        print(f"[RECEIVER] Skipping lost seq {expected} (waited {wait_time:.3f}s, have seq {min(higher_seqs)}+)")
+                        self.last_delivered = expected
+                        skipped_count += 1
+                        self._cleanup_pending()
+                        continue
+
+            # Case 3: Nothing more to deliver
+            break
+        
+        if delivered_count > 0 or skipped_count > 0:
+            print(f"[RECEIVER] Delivered {delivered_count}, skipped {skipped_count} packets")
+
+    def _cleanup_pending(self):
+        if not self.pending_reliable:
+            return
+        stale = [seq for seq in self.pending_reliable if seq <= self.last_delivered]
+        for seq in stale:
+            self.pending_reliable.pop(seq, None)
 
 # -----------------------------
 # GameQuicProtocol
@@ -134,6 +195,4 @@ class GameQuicProtocol(QuicConnectionProtocol):
                 self.api.mark_acked(seq)
             else:
                 self.api.receive_datagram(data)
-        elif isinstance(event, StreamDataReceived):
-            data = event.data
-            self.api.receive_datagram(data)
+
