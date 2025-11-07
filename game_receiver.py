@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from hquic import GameQuicProtocol  # your current QUIC wrapper
+from hquic import GameQuicProtocol
 from aioquic.asyncio import serve
 from aioquic.quic.configuration import QuicConfiguration
 
@@ -146,6 +146,7 @@ async def run_receiver():
     print("[RECEIVER] Listening on 127.0.0.1:4433...")
     try:
         await asyncio.sleep(60)
+        print("[RECEIVER] Timeout Reached...")
     except KeyboardInterrupt:
         print("[RECEIVER] Shutting down...")
     finally:

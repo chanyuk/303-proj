@@ -8,8 +8,8 @@ from aioquic.quic.events import DatagramFrameReceived, StreamDataReceived
 # -----------------------------
 # Constants
 # -----------------------------
-RETX_INTERVAL = 0.02     # 50 ms between retransmission attempts
-T_THRESHOLD = 0.150      # 200 ms total lifetime for reliable retransmission
+RETX_INTERVAL = 0.04     # 40 ms between retransmission attempts
+T_THRESHOLD = 0.150      # 150 ms total lifetime for reliable retransmission
 
 # -----------------------------
 # Helpers
